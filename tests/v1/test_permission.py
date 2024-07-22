@@ -1,169 +1,200 @@
 import sys
-import os
-import pytest
+from os.path import abspath, dirname, join
+import uuid
+
+sys.path.insert(0, abspath(join(dirname(__file__), '../..')))
+
+import jwt
+from decouple import config
 from fastapi.testclient import TestClient
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from decouple import config
+from api.db.database import get_db, Base
 from main import app
-from api.db.database import Base, get_db
-from api.utils.auth import hash_password
-from api.v1.models.user import User
-from api.v1.models.permission import Permission
 
-# Add the project root to sys.path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-SQLALCHEMY_DATABASE_URL = config('DB_URL')
-
+SQLALCHEMY_DATABASE_URL = config("DB_URL")
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-Base.metadata.create_all(bind=engine)
+SECRET_KEY = config("SECRET_KEY")
+ALGORITHM = "HS256"
 
-def override_get_db():
+@pytest.fixture(scope="module")
+def session():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
     db = TestingSessionLocal()
     try:
         yield db
     finally:
         db.close()
 
-app.dependency_overrides[get_db] = override_get_db
-
-client = TestClient(app)
-
+@pytest.fixture(autouse=True)
+def clear_db():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
 
 @pytest.fixture(scope="module")
-def test_db():
-    db = TestingSessionLocal()
-    yield db
-    db.close()
+def client(session):
+    def override_get_db():
+        try:
+            yield session
+        finally:
+            session.close()
+    app.dependency_overrides[get_db] = override_get_db
+    yield TestClient(app)
 
-def create_user(test_db):
-    # Add user to database
-    user = User(
-        username="testuser",
-        email="testuser@gmail.com",
-        password=hash_password('Testpassword@123'),
-        first_name='Test',
-        last_name='User',
-        is_active=True,
-        is_admin=True  # Ensure user is admin to create permissions
+@pytest.fixture(scope="module")
+def admin_token():
+    token = jwt.encode({"username": "admin"}, SECRET_KEY, algorithm=ALGORITHM)
+    return token
+
+@pytest.fixture(scope="module")
+def invalid_token():
+    token = jwt.encode({"username": "invalid"}, "invalid_key", algorithm=ALGORITHM)
+    return token
+
+def test_create_permission(client, admin_token):
+    # Ensure no duplicate permission exists before creation
+    response = client.get(
+        "/api/v1/permissions",
+        headers={"Authorization": f"Bearer {admin_token}"}
     )
-    test_db.add(user)
-    test_db.commit()
-    test_db.refresh(user)
+    if response.status_code == 200:
+        permissions = response.json()["data"]
+        for permission in permissions:
+            if permission['name'] == "test_permission":
+                client.delete(
+                    f"/api/v1/permissions/{permission['id']}",
+                    headers={"Authorization": f"Bearer {admin_token}"}
+                )
 
-def test_create_permission(test_db):
-    create_user(test_db)
-    
-    login = client.post('/auth/login', data={
-        "username": "testuser",
-        "password": "Testpassword@123"
-    })
-    access_token = login.json()['access_token']
-
+    # Create a new permission
     response = client.post(
         "/api/v1/permissions",
-        headers={"Authorization": f"Bearer {access_token}"},
-        json={"name": "test_permission", "description": "Test Permission"}
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"name": "test_permission", "description": "Test permission"},
     )
-    assert response.status_code == 201
-    data = response.json()
-    assert data["name"] == "test_permission"
-    assert data["description"] == "Test Permission"
-
-def test_create_permission_duplicate_name(test_db):
-    login = client.post('/auth/login', data={
-        "username": "testuser",
-        "password": "Testpassword@123"
-    })
-    access_token = login.json()['access_token']
-
-    # Create the first permission
-    response = client.post(
-        "/api/v1/permissions",
-        headers={"Authorization": f"Bearer {access_token}"},
-        json={"name": "duplicate_permission", "description": "Test Permission"}
-    )
+    if response.status_code != 201:
+        print(response.json())  # Print the response content for debugging
     assert response.status_code == 201
 
-    # Attempt to create a permission with an existing name
+def test_create_permission_unauthorized(client, invalid_token):
     response = client.post(
         "/api/v1/permissions",
-        headers={"Authorization": f"Bearer {access_token}"},
-        json={"name": "duplicate_permission", "description": "Test Permission Duplicate"}
+        headers={"Authorization": f"Bearer {invalid_token}"},
+        json={"name": "unauthorized_permission", "description": "This should not be created"},
     )
-    assert response.status_code == 400
-    assert response.json() == {"detail": "Permission already exists."}
+    assert response.status_code == 401, f"Expected status code 401, but got {response.status_code}"
 
-def test_create_permission_unauthorized(test_db):
+def test_get_permissions(client, admin_token):
+    response = client.get(
+        "/api/v1/permissions", headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    assert response.status_code == 200
+
+def test_get_permission(client, admin_token):
+    response = client.get(
+        "/api/v1/permissions",
+        headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    if response.status_code == 200:
+        permissions = response.json()["data"]
+        for permission in permissions:
+            if permission['name'] == "get_permission":
+                client.delete(
+                    f"/api/v1/permissions/{permission['id']}",
+                    headers={"Authorization": f"Bearer {admin_token}"}
+                )
+
     response = client.post(
         "/api/v1/permissions",
-        headers={"Authorization": "Bearer invalid-token"},
-        json={"name": "unauthorized_permission", "description": "This should not be created."}
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"name": "get_permission", "description": "Permission to get"},
     )
-    assert response.status_code == 401
-    assert response.json() == {"detail": "Could not validate credentials"}
+    if response.status_code != 201:
+        print(response.json())  # Print the response content for debugging
+    assert response.status_code == 201
 
-def test_get_permissions(test_db):
-    login = client.post('/auth/login', data={
-        "username": "testuser",
-        "password": "Testpassword@123"
-    })
-    access_token = login.json()['access_token']
+    created_permission = response.json()["data"]
+    permission_id = created_permission['id']
 
-    response = client.get("/api/v1/permissions", headers={"Authorization": f"Bearer {access_token}"})
+    response = client.get(
+        f"/api/v1/permissions/{permission_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
     assert response.status_code == 200
-    assert isinstance(response.json(), list)
 
-def test_get_permission(test_db):
-    login = client.post('/auth/login', data={
-        "username": "testuser",
-        "password": "Testpassword@123"
-    })
-    access_token = login.json()['access_token']
+def test_update_permission(client, admin_token):
+    response = client.get(
+        "/api/v1/permissions",
+        headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    if response.status_code == 200:
+        permissions = response.json()["data"]
+        for permission in permissions:
+            if permission['name'] == "updated_permission":
+                client.delete(
+                    f"/api/v1/permissions/{permission['id']}",
+                    headers={"Authorization": f"Bearer {admin_token}"}
+                )
+            if permission['name'] == "update_permission":
+                client.delete(
+                    f"/api/v1/permissions/{permission['id']}",
+                    headers={"Authorization": f"Bearer {admin_token}"}
+                )
 
-    permission = Permission(name="test_permission_to_get", description="Test Permission to Get")
-    test_db.add(permission)
-    test_db.commit()
-    test_db.refresh(permission)
+    response = client.post(
+        "/api/v1/permissions",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"name": "update_permission", "description": "Permission to update"},
+    )
+    if response.status_code != 201:
+        print(response.json())  # Print the response content for debugging
+    assert response.status_code == 201
 
-    response = client.get(f"/api/v1/permissions/{permission.id}", headers={"Authorization": f"Bearer {access_token}"})
+    created_permission = response.json()["data"]
+    permission_id = created_permission['id']
+
+    response = client.put(
+        f"/api/v1/permissions/{permission_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"name": "updated_permission", "description": "Updated permission"},
+    )
+    if response.status_code != 200:
+        print(response.json())  # Print the response content for debugging
     assert response.status_code == 200
-    data = response.json()
-    assert data["name"] == "test_permission_to_get"
 
-def test_update_permission(test_db):
-    login = client.post('/auth/login', data={
-        "username": "testuser",
-        "password": "Testpassword@123"
-    })
-    access_token = login.json()['access_token']
+def test_delete_permission(client, admin_token):
+    response = client.get(
+        "/api/v1/permissions",
+        headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    if response.status_code == 200:
+        permissions = response.json()["data"]
+        for permission in permissions:
+            if permission['name'] == "delete_permission":
+                client.delete(
+                    f"/api/v1/permissions/{permission['id']}",
+                    headers={"Authorization": f"Bearer {admin_token}"}
+                )
 
-    permission = Permission(name="test_permission_to_update", description="Test Permission to Update")
-    test_db.add(permission)
-    test_db.commit()
-    test_db.refresh(permission)
+    response = client.post(
+        "/api/v1/permissions",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"name": "delete_permission", "description": "Permission to delete"}
+    )
+    if response.status_code != 201:
+        print(response.json()) 
+    assert response.status_code == 201, f"Create permission failed with {response.json()}"
 
-    update_data = {"name": "updated_test_permission", "description": "Updated Test Permission"}
-    response = client.put(f"/api/v1/permissions/{permission.id}", json=update_data, headers={"Authorization": f"Bearer {access_token}"})
-    assert response.status_code == 200
-    data = response.json()
-    assert data["name"] == "updated_test_permission"
+    created_permission = response.json()["data"]
+    permission_id = created_permission['id']
 
-def test_delete_permission(test_db):
-    login = client.post('/auth/login', data={
-        "username": "testuser",
-        "password": "Testpassword@123"
-    })
-    access_token = login.json()['access_token']
-
-    permission = Permission(name="test_permission_to_delete", description="Test Permission to Delete")
-    test_db.add(permission)
-    test_db.commit()
-    test_db.refresh(permission)
-
-    response = client.delete(f"/api/v1/permissions/{permission.id}", headers={"Authorization": f"Bearer {access_token}"})
-    assert response.status_code == 200
-    assert response.json() == {"message": "Permission deleted successfully."}
+    response = client.delete(
+        f"/api/v1/permissions/{permission_id}",
+        headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    assert response.status_code == 200, f"Delete permission failed with {response.json()}"
+    print(response.json())

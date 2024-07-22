@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """ This module contains the Json response class
 """
-from enum import Enum
 from json import dumps
-from fastapi import status
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
-
+from datetime import datetime
+from .custom_json_encoder import CustomJSONEncoder  # Ensure you import the custom JSON encoder
 
 class JsonResponseDict(JSONResponse):
 
@@ -15,14 +14,15 @@ class JsonResponseDict(JSONResponse):
         self.message = message
         self.data = data
         self.error = error
-        super().__init__(content=jsonable_encoder(self.response()), status_code=status_code)
+        self._status_code = status_code
+        super().__init__(content=jsonable_encoder(self.response(), custom_encoder={datetime: lambda v: v.isoformat()}), status_code=status_code)
 
     def __repr__(self):
         return {
             "message": self.message,
             "data": self.data,
             "error": self.error,
-            "status_code": self.status_code
+            "status_code": self._status_code
         }
 
     def __str__(self):
@@ -31,31 +31,21 @@ class JsonResponseDict(JSONResponse):
             "message": self.message,
             "data": self.data,
             "error": self.error,
-            "status_code": self.status_code
-        })
+            "status_code": self._status_code
+        }, cls=CustomJSONEncoder)
 
     def response(self):
         """return a json response dictionary"""
         print(f"response: {format(self)}")
-        if self.status_code >= 300:
+        if self._status_code >= 300:
             return {
                 "message": self.message,
-                "data": self.data,
-                "status_code": self.status_code
+                "error": self.error,
+                "status_code": self._status_code
             }
         else:
             return {
                 "message": self.message,
-                "error": self.error,
-                "status_code": self.status_code
+                "data": self.data,
+                "status_code": self._status_code
             }
-
-"""
-usage:
-
-return JsonResponseDict(
-            message="Job creation successful",
-            data={"job": new_job.to_dict()},
-            status_code=status.HTTP_201_CREATED
-        )
-"""

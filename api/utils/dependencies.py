@@ -2,16 +2,16 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-import jwt
+from jose import JWTError, jwt
 from typing import Optional
 from datetime import datetime, timedelta
 from api.v1.models.user import User
 import os
-from jose import JWTError
 import bcrypt
 from api.v1.schemas.token import TokenData
 from api.db.database import get_db
 from .config import SECRET_KEY, ALGORITHM
+
 # Initialize OAuth2PasswordBearer
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -34,12 +34,10 @@ def get_current_user(db: Session = Depends(get_db), token: str = Depends(oauth2_
         raise credentials_exception
     return user
 
-def get_current_admin(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
-    user = get_current_user(db, token)
-    if not user.is_admin:
+def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
+    if not current_user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have permission to access this resource",
+            detail="Not enough permissions",
         )
-    return user
-
+    return current_user
